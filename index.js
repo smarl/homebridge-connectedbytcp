@@ -1,7 +1,13 @@
 var request = require("request"),
+    NodeCache = require( "node-cache" ),
     uuid = require("node-uuid"),
     xml2js = require('xml2js'),
     Service, Characteristic;
+
+var CAROUSEL = "carousel";
+
+var carouself_request_in_progress = false;
+var carouself_request_in_progress_timeout_id = 0;
 
 module.exports = function(homebridge) {
   Service = homebridge.hap.Service;
@@ -11,6 +17,7 @@ module.exports = function(homebridge) {
 };
 
 function ConnectedByTcp(log, config) {
+  this.myCache    = new NodeCache( { stdTTL: 15, checkperiod: 5 } );
   this.log        = log;
   this.name       = config["name"];
   this.ip         = config["ip"];
@@ -85,10 +92,9 @@ ConnectedByTcp.prototype = {
       for (var i = 0; i < result.gip.room.length; i++) {
         for (var j = 0; j < result.gip.room[i].device.length; j++) {
           for (var k = 0; k < result.gip.room[i].device[j].did.length; k++) {
-            self.log(JSON.stringify(result.gip.room[i].device[j]));
-            var level = 0;
-            if("level" in result.gip.room[i].device[j]) {
-              level = result.gip.room[i].device[j].level[k];
+            level = 0;
+	    if( result.gip.room[i].device[j].level ) {
+	      level = result.gip.room[i].device[j].level[k];
             }
             var newDevice = new TcpLightbulb(
                               self,
@@ -106,8 +112,32 @@ ConnectedByTcp.prototype = {
   },
   
   roomGetCarousel: function(callback) {
-    var self = this,
-        hubAddress = "https://" + self.ip + "/gwr/gop.php",
+    var self = this;
+
+    if( carouself_request_in_progress ) {
+        if(this.loglevel >= 3) {
+            this.log("roomGetCarousel: carouself_request_in_progress==true. Setting timeout so that this will try again in 100ms.");
+        }
+        setTimeout(function() { self.roomGetCarousel(callback); }, 100);
+        return;
+    }
+
+    cached = this.myCache.get( CAROUSEL );
+    if ( cached != undefined ){
+        if(this.loglevel >= 3) {
+            this.log("roomGetCarousel: Using cache.");
+        }
+        callback(cached);
+        return;
+    }
+    if(this.loglevel >= 3) {
+        this.log("roomGetCarousel: No cache found.");
+    }
+
+    carouself_request_in_progress = true;
+    carouself_request_in_progress_timeout_id = setTimeout(function() { carouself_request_in_progress = false; }, 2000);
+
+    var hubAddress = "https://" + self.ip + "/gwr/gop.php",
         cmd="RoomGetCarousel",
         data=encodeURIComponent("<gip><version>1</version><token>" + self.token + "</token><fields>name\ncontrol\npower\nproduct\nclass\nrealtype\nstatus</fields></gip>"),
         fmt="xml";
@@ -134,9 +164,15 @@ ConnectedByTcp.prototype = {
           self.log("roomGetCarousel result: %s", body);
         }
         xml2js.parseString(body, function (err, result) {
+          carouself_request_in_progress = false;
+          clearTimeout(carouself_request_in_progress_timeout_id);
           if(callback) {
-	          callback(result);
-	      }
+              self.myCache.set( CAROUSEL, result );
+              if(self.loglevel >= 3) {
+                  self.log("roomGetCarousel: Setting cache.");
+              }
+              callback(result);
+          }
         });
       }
     });
@@ -160,11 +196,7 @@ ConnectedByTcp.prototype = {
               }
                 
               tcpLightbulb.state = result.gip.room[i].device[j].state[k];
-              if("level" in result.gip.room[i].device[j]) {
-                tcpLightbulb.level = result.gip.room[i].device[j].level[k];
-              } else {
-                tcpLightbulb.level = 0;
-              }
+              tcpLightbulb.level = result.gip.room[i].device[j].level ? result.gip.room[i].device[j].level[k] : 0;
           }
           }
         }
@@ -214,6 +246,11 @@ ConnectedByTcp.prototype = {
         self.log("error: " + error);
         self.log("response: " + response);
         self.log("body: " + body);
+
+          if(self.loglevel >= 3) {
+              self.log("deviceSendCommand: Clearing cache.");
+          }
+        self.myCache.del(CAROUSEL);
       }
     });
   },
@@ -260,6 +297,8 @@ ConnectedByTcp.prototype = {
         self.log("error: " + error);
         self.log("response: " + response);
         self.log("body: " + body);
+
+        self.myCache.del(CAROUSEL);
       }
     });
   }
